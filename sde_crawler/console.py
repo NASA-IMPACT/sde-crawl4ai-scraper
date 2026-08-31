@@ -32,17 +32,23 @@ class JobLog:
         delay: float,
         concurrent: int,
         obey_robots: bool,
+        url_count: int | None = None,
+        url_timeout: float = 180.0,
     ) -> None:
         host = urlparse(seed).netloc
         self._write()
         self._write("-" * 60)
         self._write("  SDE crawl")
         self._write("-" * 60)
+        if url_count is not None:
+            self._write(f"  mode        url_list ({url_count} urls)")
         self._write(f"  seed        {seed}")
         self._write(f"  host        {host}")
-        self._write(f"  depth_limit {depth_limit}")
+        if url_count is None:
+            self._write(f"  depth_limit {depth_limit}")
         self._write(f"  max_pages   {max_pages}")
         self._write(f"  delay       {delay}s   concurrency {concurrent}")
+        self._write(f"  url_timeout {url_timeout}s")
         self._write(f"  obey_robots {obey_robots}")
         self._write("-" * 60)
         self._write()
@@ -79,6 +85,9 @@ class JobLog:
 
         if status in {"ok", "pdf", "plain"} and self.ok % 25 == 0 and self.ok > 0:
             self._write(f"  ... {self.ok} docs / {self.failed} failed  (cap {max_pages})")
+
+    def checkpoint(self, *, documents: int, uri: str) -> None:
+        self._write(f"  checkpoint  {documents} docs -> {uri}")
 
     def footer(
         self,

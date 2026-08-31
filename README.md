@@ -1,6 +1,6 @@
 # SDE Scraper : Crawl4AI v1
 
-Seed URL in → same-site documents out.
+Seed URL in → same-site documents out. Optional `urls` list for targeted fetches.
 
 > Detailed documentation and workflow diagrams for this v1 scraper are in the [SDE Crawler design notes](https://docs.google.com/document/d/1C-ntJbdYMe-yTp4MVlO7p7jhkqxbqapETMvGOag6zMc/edit?pli=1&tab=t.0).
 
@@ -13,10 +13,13 @@ jobs/incoming/*.json  →  watcher  →  run.py (≤3 sites)  →  documents + f
 ## Features
 
 - Same-site BFS crawl (apex + `www` by default)
+- Optional URL list (no BFS)
 - HTML/JS via Chromium; PDF and plain text via HTTP extract
 - Skips binaries, archives, media, FTP trees, and similar non-document assets
 - Job queue is a filesystem folder (no SQS)
 - Up to 3 collections in parallel; 1 URL at a time per site
+- Documents checkpointed to S3 during the run (JSON array)
+- Per-URL timeout (default 180s)
 - Failures logged as JSONL during the run; summary written at the end
 
 ## Requirements
@@ -49,7 +52,7 @@ Outputs:
 
 ## Job format
 
-Only `seed` is required. Omitted fields use defaults; present fields override them.
+Either `seed` or `urls` is required. Omitted fields use defaults; present fields override them.
 
 ```json
 {"seed": "https://www.ligo.org"}
@@ -59,13 +62,23 @@ Only `seed` is required. Omitted fields use defaults; present fields override th
 {"seed": "https://espo.nasa.gov/", "collection_id": "espo", "max_pages": 5000}
 ```
 
+```json
+{"collection_id": "targeted", "urls": ["https://www.ligo.org/", "https://aurorasaurus.org/"]}
+```
+
+`urls`: fetch only those URLs (no BFS). Set `collection_id` when hosts differ.
+
 | Field | Default | Description |
 |-------|---------|-------------|
-| `seed` | *(required)* | Start URL |
+| `seed` | required unless `urls` | Start URL for BFS |
+| `urls` | | Targeted list; no link discovery |
 | `max_pages` | `100000` | Document ceiling (hard max 100000) |
-| `depth_limit` | unlimited | Optional hop limit |
+| `depth_limit` | unlimited | Optional hop limit (BFS only) |
 | `delay` | `0.25` | Seconds between requests |
-| `concurrent_requests` | `1` | Parallelism within one site |
+| `concurrent_requests` | `1` | Parallelism within one job |
+| `url_timeout` | `180` | Seconds per URL fetch+extract |
+| `checkpoint_pages` | `100` | S3 document flush every N docs |
+| `checkpoint_seconds` | `300` | S3 document flush interval |
 | `obey_robots` | `false` | Honor robots.txt when true |
 | `include_subdomains` | `false` | Crawl `*.apex` when true |
 | `collection_id` | derived from host | Output / S3 object name |
@@ -94,7 +107,7 @@ run.py                  # loads all inbox JSON; ThreadPoolExecutor(max_workers=3
 - **Queue:** the `jobs/incoming/` directory. There is no external message broker.
 - **Watcher:** `watch_inbox.sh` uses `inotifywait` (`close_write` / `moved_to`). It does not crawl; it starts `run.py` under `flock`.
 - **Concurrency:** one `run.py` process (via flock); up to three collections inside that process; when one finishes, the next inbox job in that batch starts.
-- **S3:** set `SDE_S3_BUCKET`, or provide `/etc/sde/env` / `.env`. Objects:
+- **S3:** set `SDE_S3_BUCKET`, or provide `/etc/sde/env` / `.env`. Local documents are removed after a successful upload. Objects:
   - `scraped_collections/<id>.json`
   - `failure_logs/<id>_failures.jsonl`
   - `failure_logs/<id>_failures_summary.json`
@@ -131,6 +144,8 @@ Drop `*.json` into `jobs/incoming/` to enqueue work.
 | `download_error` | File download failed |
 | `crawl_unsuccessful` | Browser navigation / crawl error |
 | `challenge_*` | Bot / CAPTCHA page (logged, not solved) |
+| `url_timeout` | Fetch+extract exceeded `url_timeout` |
+| `skipped_type` | URL list item skipped (asset/binary) |
 
 ## Deploy (AWS)
 
