@@ -19,7 +19,7 @@ jobs/incoming/*.json  →  watcher  →  run.py (≤3 sites)  →  documents + f
 - Job queue is a filesystem folder (no SQS)
 - Up to 3 collections in parallel; 1 URL at a time per site
 - Documents checkpointed to S3 during the run (JSON array)
-- Per-URL timeout (default 180s)
+- Per-URL timeout (default 180s); optional post-pass retry for transient failures
 - Failures logged as JSONL during the run; summary written at the end
 
 ## Requirements
@@ -77,6 +77,8 @@ Either `seed` or `urls` is required. Omitted fields use defaults; present fields
 | `delay` | `0.25` | Seconds between requests |
 | `concurrent_requests` | `1` | Parallelism within one job |
 | `url_timeout` | `180` | Seconds per URL fetch+extract |
+| `retry_failures` | `false` | After the first pass, retry retryable failures with `retry_url_timeout` |
+| `retry_url_timeout` | `300` | Timeout for the post-pass retry |
 | `checkpoint_pages` | `100` | S3 document flush every N docs |
 | `checkpoint_seconds` | `300` | S3 document flush interval |
 | `obey_robots` | `false` | Honor robots.txt when true |

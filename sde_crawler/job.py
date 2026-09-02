@@ -12,6 +12,7 @@ from sde_crawler.defaults import (
     DEFAULT_CHECKPOINT_SECONDS,
     DEFAULT_DELAY,
     DEFAULT_MAX_PAGES,
+    DEFAULT_RETRY_URL_TIMEOUT,
     DEFAULT_URL_TIMEOUT,
 )
 from sde_crawler.scope import apex_host, normalize_seed
@@ -23,6 +24,8 @@ JOB_DEFAULTS: dict[str, Any] = {
     "obey_robots": False,
     "include_subdomains": False,
     "url_timeout": DEFAULT_URL_TIMEOUT,
+    "retry_failures": False,
+    "retry_url_timeout": DEFAULT_RETRY_URL_TIMEOUT,
     "checkpoint_pages": DEFAULT_CHECKPOINT_PAGES,
     "checkpoint_seconds": DEFAULT_CHECKPOINT_SECONDS,
 }

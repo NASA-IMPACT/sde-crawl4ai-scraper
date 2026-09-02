@@ -21,6 +21,7 @@ from sde_crawler.defaults import (
     DEFAULT_CHECKPOINT_SECONDS,
     DEFAULT_DELAY,
     DEFAULT_MAX_PAGES,
+    DEFAULT_RETRY_URL_TIMEOUT,
     DEFAULT_URL_TIMEOUT,
     MAX_PAGES_CAP,
     UNLIMITED_DEPTH,
@@ -35,6 +36,7 @@ from sde_crawler.extract import (
     response_kind,
 )
 from sde_crawler.failures import FailureLog
+from sde_crawler.retry import load_document_urls, load_retry_urls
 from sde_crawler.robots import RobotsAccountant
 from sde_crawler.scope import (
     AssetFilter,
@@ -109,6 +111,10 @@ class SeedCrawler:
         self.url_timeout = float(config.get("url_timeout", DEFAULT_URL_TIMEOUT))
         if self.url_timeout <= 0:
             raise ValueError("url_timeout must be > 0")
+        self.retry_failures = _as_bool(config.get("retry_failures"), False)
+        self.retry_url_timeout = float(config.get("retry_url_timeout", DEFAULT_RETRY_URL_TIMEOUT))
+        if self.retry_url_timeout <= 0:
+            raise ValueError("retry_url_timeout must be > 0")
 
         self.output_path = Path(config.get("output", "output/documents.jsonl"))
         self.failures_log = Path(config.get("failures_log", "logs/failures.jsonl"))
@@ -128,6 +134,8 @@ class SeedCrawler:
             checkpoint_seconds=float(config.get("checkpoint_seconds", DEFAULT_CHECKPOINT_SECONDS)),
             on_checkpoint=lambda n, uri: self.joblog.checkpoint(documents=n, uri=uri),
         )
+        self.joblog.docs = self.docs
+        self.joblog.failures = self.failures
         self._http: httpx.AsyncClient | None = None
         self._browser: AsyncWebCrawler | None = None
 
@@ -184,13 +192,51 @@ class SeedCrawler:
         return self.docs.count >= self.max_pages
 
     def _log_timeout(self, url: str, detail: str = "") -> None:
+        if not url:
+            self.joblog.note(f"  waiting: no stream result within {self.url_timeout:.0f}s, continuing...")
+            return
         reason_detail = detail or f"exceeded {self.url_timeout:.0f}s"
-        self.failures.write(url=url, reason="url_timeout", detail=reason_detail)
+        self._record_failure(
+            url=url,
+            reason="url_timeout",
+            detail=reason_detail,
+            log_status="timeout",
+        )
+
+    def _record_failure(
+        self,
+        *,
+        url: str,
+        reason: str,
+        detail: str = "",
+        title: str = "",
+        status: int | None = None,
+        log_status: str | None = None,
+        depth: int | None = None,
+    ) -> None:
+        if log_status is None:
+            if reason == "url_timeout":
+                log_status = "timeout"
+            elif reason == "empty_extract":
+                log_status = "empty"
+            elif reason == "skipped_type":
+                log_status = "skip"
+            elif reason.startswith("challenge"):
+                log_status = "challenge"
+            else:
+                log_status = "fail"
+        self.failures.write(
+            url=url,
+            reason=reason,
+            detail=detail,
+            title=title,
+            status=status,
+        )
         self.joblog.page(
-            status="timeout",
+            status=log_status,
             url=url or "(unknown)",
-            depth=None,
-            detail="url_timeout",
+            depth=depth,
+            detail=detail or reason,
             max_pages=self.max_pages,
         )
 
@@ -243,29 +289,22 @@ class SeedCrawler:
         try:
             body, ctype, status = await self._download_bytes(url)
         except Exception as exc:
-            self.failures.write(
+            self._record_failure(
                 url=url,
                 reason="download_error",
                 detail=repr(exc),
-            )
-            self.joblog.page(
-                status="fail",
-                url=url,
                 depth=depth,
-                detail="download_error",
-                max_pages=self.max_pages,
             )
             return
 
         if status >= 400:
             reason = _failure_reason(status)
-            self.failures.write(url=url, reason=reason, detail=f"HTTP {status}", status=status)
-            self.joblog.page(
-                status="fail",
+            self._record_failure(
                 url=url,
+                reason=reason,
+                detail=f"HTTP {status}",
+                status=status,
                 depth=depth,
-                detail=reason,
-                max_pages=self.max_pages,
             )
             return
 
@@ -283,28 +322,21 @@ class SeedCrawler:
                 content_type = (ctype.split(";")[0].strip() or "text/plain")
                 label = "plain"
         except Exception as exc:
-            self.failures.write(url=url, reason="extract_error", detail=repr(exc))
-            self.joblog.page(
-                status="fail",
+            self._record_failure(
                 url=url,
+                reason="extract_error",
+                detail=repr(exc),
                 depth=depth,
-                detail="extract_error",
-                max_pages=self.max_pages,
             )
             return
 
         if not text:
-            self.failures.write(
+            self._record_failure(
                 url=url,
                 reason="empty_extract",
                 detail=f"kind={kind or preferred_kind}",
-            )
-            self.joblog.page(
-                status="empty",
-                url=url,
                 depth=depth,
-                detail="empty file extract",
-                max_pages=self.max_pages,
+                log_status="empty",
             )
             return
 
@@ -341,19 +373,13 @@ class SeedCrawler:
 
             title, _ = extract_page(html, meta)
             reason = _failure_reason(status)
-            self.failures.write(
+            self._record_failure(
                 url=url,
                 reason=reason,
                 detail=result.error_message or "",
                 title=title,
                 status=status,
-            )
-            self.joblog.page(
-                status="fail",
-                url=url,
                 depth=depth,
-                detail=reason,
-                max_pages=self.max_pages,
             )
             return
 
@@ -361,36 +387,26 @@ class SeedCrawler:
 
         challenged, challenge_reason = is_challenge_page(title, html)
         if challenged:
-            self.failures.write(
+            self._record_failure(
                 url=url,
                 reason=challenge_reason,
                 detail="Challenge page skipped",
                 title=title,
                 status=status,
-            )
-            self.joblog.page(
-                status="challenge",
-                url=url,
                 depth=depth,
-                detail=challenge_reason,
-                max_pages=self.max_pages,
+                log_status="challenge",
             )
             return
 
         if not full_text:
-            self.failures.write(
+            self._record_failure(
                 url=url,
                 reason="empty_extract",
                 detail="No visible body text",
                 title=title,
                 status=status,
-            )
-            self.joblog.page(
-                status="empty",
-                url=url,
                 depth=depth,
-                detail="no visible text",
-                max_pages=self.max_pages,
+                log_status="empty",
             )
             return
 
@@ -429,7 +445,7 @@ class SeedCrawler:
                     break
                 except asyncio.TimeoutError:
                     self._log_timeout("", f"no result within {self.url_timeout:.0f}s")
-                    break
+                    continue
                 try:
                     await _process(result)
                 except asyncio.TimeoutError:
@@ -463,13 +479,12 @@ class SeedCrawler:
     async def _fetch_listed_url(self, url: str, html_cfg: CrawlerRunConfig) -> None:
         kind = path_kind(url)
         if kind == "skip":
-            self.failures.write(url=url, reason="skipped_type", detail="asset/binary extension")
-            self.joblog.page(
-                status="skip",
+            self._record_failure(
                 url=url,
+                reason="skipped_type",
+                detail="asset/binary extension",
                 depth=0,
-                detail="skipped_type",
-                max_pages=self.max_pages,
+                log_status="skip",
             )
             return
         if self.obey_robots and self.robots.would_disallow(url):
@@ -532,6 +547,28 @@ class SeedCrawler:
             return
         await run_queue()
 
+    async def _run_failure_retry(self) -> None:
+        skip = load_document_urls(self.output_path)
+        urls = load_retry_urls(self.failures_log, skip_urls=skip)
+        if not urls:
+            return
+
+        self.joblog.note("")
+        self.joblog.note("-" * 60)
+        self.joblog.note(f"  retry pass  {len(urls)} urls  timeout={self.retry_url_timeout}s")
+        self.joblog.note("-" * 60)
+        self.joblog.note("")
+
+        saved_timeout = self.url_timeout
+        saved_urls = self.urls
+        self.url_timeout = self.retry_url_timeout
+        self.urls = urls
+        try:
+            await self._run_url_list()
+        finally:
+            self.url_timeout = saved_timeout
+            self.urls = saved_urls
+
     async def _checkpoint_ticker(self) -> None:
         while True:
             try:
@@ -553,6 +590,8 @@ class SeedCrawler:
             obey_robots=self.obey_robots,
             url_count=len(self.urls) if self.urls else None,
             url_timeout=self.url_timeout,
+            retry_failures=self.retry_failures,
+            retry_url_timeout=self.retry_url_timeout,
         )
 
         await self.robots.fetch(self.seed)
@@ -599,6 +638,9 @@ class SeedCrawler:
                 await ckpt_task
             self.docs.flush_s3()
 
+        if self.retry_failures:
+            await self._run_failure_retry()
+
         array_path = write_json_array(self.output_path, self.output_path.with_suffix(".json"))
         summary = self._write_summary()
         summary_path = self.failures_log.with_name(self.failures_log.stem + "_summary.json")
@@ -629,6 +671,8 @@ class SeedCrawler:
             "delay": self.delay,
             "concurrent_requests": self.concurrent_requests,
             "url_timeout": self.url_timeout,
+            "retry_failures": self.retry_failures,
+            "retry_url_timeout": self.retry_url_timeout,
             "depth_limit": None if self.depth_unlimited else self.depth_limit,
             "max_pages": self.max_pages,
         }

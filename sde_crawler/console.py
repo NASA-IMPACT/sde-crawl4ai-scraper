@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import sys
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    from sde_crawler.documents import DocumentLog
+    from sde_crawler.failures import FailureLog
 
 
 def _short_url(url: str, max_len: int = 72) -> str:
@@ -13,15 +18,25 @@ def _short_url(url: str, max_len: int = 72) -> str:
 
 
 class JobLog:
-    def __init__(self, *, verbose: bool = False, file=None):
+    def __init__(
+        self,
+        *,
+        verbose: bool = False,
+        file=None,
+        docs: DocumentLog | None = None,
+        failures: FailureLog | None = None,
+    ):
         self.verbose = verbose
         self._out = file or sys.stdout
+        self.docs = docs
+        self.failures = failures
         self.seen = 0
-        self.ok = 0
-        self.failed = 0
 
     def _write(self, line: str = "") -> None:
         print(line, file=self._out, flush=True)
+
+    def note(self, line: str = "") -> None:
+        self._write(line)
 
     def banner(
         self,
@@ -34,6 +49,8 @@ class JobLog:
         obey_robots: bool,
         url_count: int | None = None,
         url_timeout: float = 180.0,
+        retry_failures: bool = False,
+        retry_url_timeout: float = 300.0,
     ) -> None:
         host = urlparse(seed).netloc
         self._write()
@@ -49,6 +66,8 @@ class JobLog:
         self._write(f"  max_pages   {max_pages}")
         self._write(f"  delay       {delay}s   concurrency {concurrent}")
         self._write(f"  url_timeout {url_timeout}s")
+        if retry_failures:
+            self._write(f"  retry       after pass  timeout={retry_url_timeout}s")
         self._write(f"  obey_robots {obey_robots}")
         self._write("-" * 60)
         self._write()
@@ -72,19 +91,16 @@ class JobLog:
         max_pages: int,
     ) -> None:
         self.seen += 1
-        if status in {"ok", "pdf", "plain"}:
-            self.ok += 1
-        else:
-            self.failed += 1
-
         depth_s = "-" if depth is None else str(depth)
         line = f"  {self.seen:<5} {status:<10} {depth_s:<6} {_short_url(url)}"
         self._write(line)
         if detail and (self.verbose or status not in {"ok", "pdf", "plain"}):
             self._write(f"        {detail}")
 
-        if status in {"ok", "pdf", "plain"} and self.ok % 25 == 0 and self.ok > 0:
-            self._write(f"  ... {self.ok} docs / {self.failed} failed  (cap {max_pages})")
+        docs = self.docs.count if self.docs else 0
+        if status in {"ok", "pdf", "plain"} and docs > 0 and docs % 25 == 0:
+            failures = self.failures.count if self.failures else 0
+            self._write(f"  ... {docs} docs / {failures} failures logged  (cap {max_pages})")
 
     def checkpoint(self, *, documents: int, uri: str) -> None:
         self._write(f"  checkpoint  {documents} docs -> {uri}")
