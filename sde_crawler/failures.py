@@ -25,6 +25,10 @@ def _bucket(reason: str) -> str:
         return "extract"
     if reason == "download_error":
         return "download"
+    if reason == "url_timeout":
+        return "timeout"
+    if reason == "skipped_type":
+        return "skipped"
     return "other"
 
 

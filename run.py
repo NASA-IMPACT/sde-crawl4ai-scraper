@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sde_crawler.crawler import SeedCrawler
+from sde_crawler.documents import write_json_array
 from sde_crawler.job import load_job_json, merge_job
 from sde_crawler.s3upload import upload_job_artifacts
 
@@ -82,31 +83,45 @@ def _run_one(
         coll_id = cfg["collection_id"]
 
         with worker_log.open("w", encoding="utf-8") as out:
+            urls = cfg.get("urls") or []
             out.write(
                 f"# job={job_path.name} collection_id={coll_id}\n"
                 f"# seed={cfg['seed']}\n"
+                f"# urls={len(urls) or 'bfs'}\n"
                 f"# started={datetime.now(timezone.utc).isoformat()}\n\n"
             )
             out.flush()
 
             cfg["job_log_file"] = out
             cfg["crawl4ai_base"] = str(ROOT / ".crawl4ai_runtime" / coll_id)
+            cfg["s3_bucket"] = bucket
             asyncio.run(SeedCrawler(cfg).run())
 
-            docs = Path(cfg["output"])
+            docs_jsonl = Path(cfg["output"])
+            docs_json = docs_jsonl.with_suffix(".json")
             fails = Path(cfg["failures_log"])
             summary = fails.with_name(fails.stem + "_summary.json")
+
+            if docs_jsonl.is_file() and not docs_json.is_file():
+                write_json_array(docs_jsonl, docs_json)
 
             if bucket:
                 uploaded = upload_job_artifacts(
                     bucket=bucket,
                     coll_id=coll_id,
-                    documents_path=docs,
+                    documents_path=docs_json,
                     failures_path=fails,
                     summary_path=summary,
                 )
                 out.write("\n# s3 " + ", ".join(f"{k}={v}" for k, v in uploaded.items()) + "\n")
+                if uploaded.get("documents"):
+                    for path in (docs_jsonl, docs_json):
+                        if path.is_file():
+                            path.unlink()
+                    out.write("# local documents removed after s3\n")
             else:
+                if docs_jsonl.is_file() and docs_json.is_file():
+                    docs_jsonl.unlink()
                 out.write("\n# s3 skipped (no bucket)\n")
 
             elapsed = time.monotonic() - t0

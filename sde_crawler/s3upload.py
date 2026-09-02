@@ -8,6 +8,18 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def upload_file(*, bucket: str, path: Path, key: str) -> str:
+    try:
+        import boto3
+    except ImportError as exc:
+        raise RuntimeError("boto3 is required for S3 upload") from exc
+
+    if not path.exists():
+        raise FileNotFoundError(path)
+    boto3.client("s3").upload_file(str(path), bucket, key)
+    return f"s3://{bucket}/{key}"
+
+
 def upload_job_artifacts(
     *,
     bucket: str,
@@ -16,15 +28,9 @@ def upload_job_artifacts(
     failures_path: Path,
     summary_path: Path,
 ) -> dict[str, str]:
-    try:
-        import boto3
-    except ImportError as exc:
-        raise RuntimeError("boto3 is required for S3 upload") from exc
-
     from sde_crawler.job import s3_keys_for_collection
 
     keys = s3_keys_for_collection(coll_id)
-    client = boto3.client("s3")
     uploaded: dict[str, str] = {}
 
     for label, path, key in (
@@ -35,7 +41,6 @@ def upload_job_artifacts(
         if not path.exists():
             logger.warning("missing %s: %s", label, path)
             continue
-        client.upload_file(str(path), bucket, key)
-        uploaded[label] = f"s3://{bucket}/{key}"
+        uploaded[label] = upload_file(bucket=bucket, path=path, key=key)
 
     return uploaded
